@@ -18,10 +18,14 @@
 # for the use or reliability of any portion of this document.
 #
 # General permission to copy or modify is hereby granted.
-
+import cv2
+from valve_qc import score_bgra_frame, QCConfig
 import sys
 from color_detection import ColorDetector, CDConfig
 import numpy as np
+from pattern_detection import PatternDetector, PDConfig
+from collections import deque
+
 
 try:
     from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QLabel, QMainWindow, QMessageBox, QWidget
@@ -45,6 +49,9 @@ TARGET_PIXEL_FORMAT = ids_peak_ipl.PixelFormatName_BGRa8
 class MainWindow(QMainWindow):
     def __init__(self, parent: QWidget = None):
         super().__init__(parent)
+        from collections import deque
+        self.__qc_window = deque(maxlen=8)  # keeps last 8 PASS/FAIL states
+
 
         self.widget = QWidget(self)
         self.__layout = QVBoxLayout()
@@ -67,6 +74,15 @@ class MainWindow(QMainWindow):
 
         self.__image_converter = ids_peak_ipl.ImageConverter()
         self.__color_detector = ColorDetector(CDConfig(color="blue"))
+        self.__pattern_detector = PatternDetector(PDConfig(
+            pass_dir=r"C:\Users\roman\PycharmProjects\PythonProject2\.venv\Pass",
+            fail_dir=r"C:\Users\roman\PycharmProjects\PythonProject2\.venv\Fail",
+            debug=True
+        ))
+
+        self.__color_detector.cfg.overlay_alpha = 0.3
+        self.__color_detector.cfg.draw_boxes = False
+        self.__qc_cfg = QCConfig()
 
         # The library must be initialized before use.
         # Each `Initialize` call must be matched with a corresponding call
@@ -359,6 +375,32 @@ class MainWindow(QMainWindow):
 
             # ---- Color Detection (blue) ----
             bgra_out, info = self.__color_detector.process_bgra_to_bgra(bgra)
+            bgra_out, qc = score_bgra_frame(bgra, self.__qc_cfg)
+            self.__qc_window.append(qc["decision"] == "PASS")
+            pass_votes = sum(self.__qc_window)
+            fail_votes = len(self.__qc_window) - pass_votes
+
+            stable_pass = (pass_votes >= 6)  # 6 of last 8 frames PASS
+            stable_fail = (fail_votes >= 6)
+
+            if stable_pass:
+                verdict = "PASS"
+            elif stable_fail:
+                verdict = "FAIL"
+            else:
+                verdict = "…stabilizing"
+
+            # (optional) show it
+            self.__label_infos.setText(
+                f"Frames:{self.__frame_counter} | PASS votes:{pass_votes}/8 | Verdict:{verdict}"
+            )
+
+            # Convert BGRA to BGR
+            bgr_frame = cv2.cvtColor(bgra_out, cv2.COLOR_BGRA2BGR)
+
+            # Run pattern classification
+            result = self.__pattern_detector.analyze(bgr_frame)
+            print(f"[Pattern Detection] Decision={result['decision']}  Confidence={result['confidence']:.2f}")
 
             # Build QImage from the processed BGRA and make Qt own the data
             image = QImage(bgra_out.data, w, h, QImage.Format_RGB32).copy()
